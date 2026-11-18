@@ -346,6 +346,49 @@ def test_no_boarding_a_lander_over_sea():
     assert not any(a.type == AT.LOAD and a.dest == (2, 0) for a in g.unit_actions(tank))
 
 
+def _board(g, tr_id, cargo_id):
+    tr, c = g.units[tr_id], g.units[cargo_id]
+    g.pos.pop((c.x, c.y), None)
+    c.x, c.y, c.loaded_in = tr.x, tr.y, tr.id
+    tr.cargo.append(c.id)
+
+
+def test_no_unload_from_a_transport_on_sea():
+    # libaw rule findings A10 (0 of ~3,900 recorded unloads): Landers / Black Boats / APCs / T-Copters on Sea or Reef
+    # cannot unload, even onto land next to them
+    g = new(["..~~.", "..~~.", ".....", ".....", "....."], [(0, UT.LANDER, 2, 1), (0, UT.TANK, 0, 4), (1, UT.INF, 4, 4)])
+    _board(g, 1, 2)
+    lander = g.units[1]
+    acts = g.unit_actions(lander)
+    assert not any(a.type == AT.UNLOAD for a in acts)        # every tile the Lander can reach is sea
+    # a T-Copter over sea may not drop either, but may after flying onto land
+    g = new(["..~~.", "..~~.", ".....", ".....", "....."], [(0, UT.TCOPTER, 2, 1), (0, UT.INF, 0, 4), (1, UT.INF, 4, 4)])
+    _board(g, 1, 2)
+    acts = g.unit_actions(g.units[1])
+    assert not any(a.type == AT.UNLOAD and a.dest == (2, 1) for a in acts)
+    assert any(a.type == AT.UNLOAD and a.dest == (2, 2) for a in acts)
+
+
+def test_hawke_heal_skips_carried_units():
+    g = new(PLAIN5, [(0, UT.APC, 1, 1), (0, UT.INF, 0, 4, 50), (0, UT.TANK, 2, 2, 50), (1, UT.INF, 4, 4)])
+    _board(g, 1, 2)
+    g.players[0].co = "Hawke"
+    g.co(0).on_power(g, 0, 1)
+    assert g.units[2].hp == 50 and g.units[3].hp == 60
+
+
+def test_black_boat_tops_up_9x_only_when_supplies_needed():
+    g = new(PLAIN5, [(0, UT.BLACKBOAT, 1, 1), (0, UT.TANK, 2, 1, 95), (1, UT.INF, 4, 4)])
+    g.players[0].funds = 10000
+    g.step(A(AT.REPAIR, 1, (1, 1), (2, 1)))
+    assert g.units[2].hp == 95
+    g = new(PLAIN5, [(0, UT.BLACKBOAT, 1, 1), (0, UT.TANK, 2, 1, 95), (1, UT.INF, 4, 4)])
+    g.players[0].funds = 10000
+    g.units[2].ammo = 0
+    g.step(A(AT.REPAIR, 1, (1, 1), (2, 1)))
+    assert g.units[2].hp == 100 and g.players[0].funds == 10000
+
+
 def test_join_merges_hp_and_refunds():
     g = new(PLAIN5, [(0, UT.TANK, 1, 1, 70), (0, UT.TANK, 2, 1, 60), (1, UT.INF, 4, 4)])
     f = g.players[0].funds

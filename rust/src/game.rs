@@ -471,7 +471,7 @@ impl Game {
     fn on_power(&mut self, p: usize, lvl: u8) {
         let l = lvl as i64;
         match self.co(p) {
-            CO_ANDY => self.heal_all(p, if lvl == 1 { 20 } else { 50 }),
+            CO_ANDY => self.heal_all(p, if lvl == 1 { 20 } else { 50 }, true),
             CO_RACHEL => {
                 if lvl == 2 {
                     self.rachel_missiles(p)
@@ -507,7 +507,7 @@ impl Game {
             CO_JESS => self.resupply_all(p),
             CO_SENSEI => self.sensei_spawn(p, if lvl == 1 { UT_INF } else { UT_MECH }),
             CO_HAWKE => {
-                self.heal_all(p, 10 * l);
+                self.heal_all(p, 10 * l, false); // AWBW (libaw B6): Hawke skips carried units
                 self.damage_enemies(p, 10 * l, false, false);
             }
             CO_KINDLE => {
@@ -1113,6 +1113,11 @@ impl Game {
 
     fn unload_actions(&self, id: i64, dest: (i32, i32), acts: &mut Vec<Action>) {
         let u = self.u(id);
+        // AWBW (libaw A10): APC / T-Copter / Lander / Black Boat cannot unload while standing on Sea or Reef
+        let k = self.kind_at(dest.0, dest.1);
+        if IS_TRANSPORT[u.t as usize] && (k == TK_SEA || k == TK_REEF) {
+            return;
+        }
         for &cid in &u.cargo {
             let c = self.u(cid);
             if c.acted {
@@ -1432,11 +1437,12 @@ impl Game {
             AT_REPAIR => {
                 let p = self.u(id).owner;
                 let o = self.unit_at(a.tx, a.ty).expect("repair target");
-                let (ohp, ot) = {
+                let (ohp, ot, needs) = {
                     let ou = self.u(o);
-                    (ou.hp, ou.t)
+                    (ou.hp, ou.t, ou.fuel < UNIT_FUEL[ou.t as usize] || ou.ammo < UNIT_AMMO[ou.t as usize])
                 };
-                if ohp < 100 {
+                // AWBW (libaw B4): a 9.x unit is topped up to 10 only if it also needs supplies
+                if ohp < 100 && (disp(ohp) < 10 || needs) {
                     let new = (ohp + 10).min(100);
                     let cost = fdiv(self.unit_cost(p, ot) * (disp(new) - disp(ohp)), 10);
                     if self.players[p].funds >= cost {
@@ -1607,9 +1613,9 @@ impl Game {
         }
     }
 
-    fn heal_all(&mut self, p: usize, amt: i64) {
+    fn heal_all(&mut self, p: usize, amt: i64, carried: bool) {
         for v in self.units.iter_mut() {
-            if v.owner == p {
+            if v.owner == p && (carried || v.loaded_in == NONE) {
                 v.hp = (v.hp + amt).min(100);
             }
         }

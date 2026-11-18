@@ -443,7 +443,7 @@ class Hawke(CO):
         return 110
 
     def on_power(self, g, p, lvl):
-        g.heal_all(p, 10 * lvl)
+        g.heal_all(p, 10 * lvl, carried=False)   # AWBW (libaw B6, hot-seat game 1762036): Hawke skips carried units
         g.damage_enemies(p, 10 * lvl)
 
 

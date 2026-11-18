@@ -15,7 +15,7 @@ from typing import Callable, Optional
 from .cos import CO, COS
 from .data import (
     BUILDS, CAPTURABLE, CARRY, DMG, FACTORY_UNITS, FOOT, GROUND_UNITS, INCOME_PROPS, MT, STARS,
-    TK, UNITS, URBAN, UT, AIR_UNITS, NAVAL_UNITS, move_cost, uses_ammo, weapon,
+    TK, TRANSPORTS, UNITS, URBAN, UT, AIR_UNITS, NAVAL_UNITS, move_cost, uses_ammo, weapon,
 )
 
 STAR_BASE = 9000          # funds-points per power star   (AW2 value; AWBW value UNVERIFIED)
@@ -503,6 +503,10 @@ class Game:
 
     def _unload_actions(self, u, dest) -> list:
         acts = []
+        # AWBW (libaw rule findings A10; 0 of ~3,900 recorded unloads): APC / T-Copter / Lander / Black Boat cannot
+        # unload while standing on Sea or Reef (Cruiser and Carrier can)
+        if u.type in TRANSPORTS and self.kinds[dest[1]][dest[0]] in (TK.SEA, TK.REEF):
+            return acts
         for cid in u.cargo:
             c = self.units[cid]
             if c.acted:   # AWBW refuses to drop cargo that boarded this turn (live game 1764106, 2026-11-15)
@@ -646,7 +650,8 @@ class Game:
         elif t == AT.REPAIR:
             p = u.owner
             o = self.unit_at(*a.target)
-            if o.hp < 100:
+            # AWBW (libaw B4): +1.0 HP keeping the fraction; a 9.x unit is topped up to 10 only if it also needs supplies
+            if o.hp < 100 and (disp(o.hp) < 10 or self._needs_supply(o)):
                 new = min(100, o.hp + 10)
                 cost = self.unit_cost(p, o.type) * (disp(new) - disp(o.hp)) // 10
                 if self.players[p].funds >= cost:
@@ -749,9 +754,9 @@ class Game:
             if halve_fuel:
                 v.fuel //= 2
 
-    def heal_all(self, p, amt):
+    def heal_all(self, p, amt, carried=True):
         for v in self.units.values():
-            if v.owner == p:
+            if v.owner == p and (carried or v.loaded_in is None):
                 v.hp = min(100, v.hp + amt)
 
     def resupply_all(self, p):
