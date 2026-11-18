@@ -23,6 +23,8 @@ no game art or map data; the recording above uses AWBW's sprites for display onl
 The Python engine has been validated against more than 40,000 real AWBW Global League and Live League games:
 every action of every game is replayed through the engine from AWBW's own turn snapshots and checked for
 legality, damage, power-meter charge, power effects and the full board state at each turn start.
+Its edge-case rules also follow the [libaw rule findings](https://github.com/collinjackson/libaw/blob/main/docs/awbw-rule-findings.md)
+(damage rounding, Sonja / Kanbei counters, Counter Break, missile aim, transports on sea, and more).
 
 ## Python
 
