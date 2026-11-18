@@ -47,8 +47,12 @@ class CO:
         return self.luck_levels[lvl]
 
     def counter_boost(self, lvl):
-        """True if this CO's counterattacks deal 1.5x damage."""
+        """True if this CO's counterattacks get the x1.5 counter bonus (on its own attack value only)."""
         return False
+
+    def atk_milli(self, g, p, lvl):
+        """Extra attack in thousandths of a percent point, unrounded (Colin's Power of Money)."""
+        return 0
 
     def star_mult(self, lvl):
         return 1
@@ -154,7 +158,8 @@ class Max(CO):
         return 100
 
     def move_bonus(self, g, p, u, lvl):
-        return lvl if (_direct(u.type) and u.type not in FOOT) else 0
+        # libaw B21: every unit that is not an indirect, a foot soldier or a transport (the Black Bomb too)
+        return lvl if not (_indirect(u.type) or u.type in FOOT or u.type in TRANSPORTS) else 0
 
     def range_bonus(self, g, p, u, lvl):
         return -1 if _indirect(u.type) else 0
@@ -214,10 +219,11 @@ class Colin(CO):
     cost_levels = (80, 80, 80)
 
     def atk(self, g, p, a, d, lvl):
-        v = 90
-        if lvl == 2:
-            v += (3 * g.players[p].funds) // 1000
-        return v
+        return 90
+
+    def atk_milli(self, g, p, lvl):
+        # libaw #6: +3% per 1000 funds held at each attack, unrounded
+        return 3 * max(0, g.players[p].funds) if lvl == 2 else 0
 
     def on_power(self, g, p, lvl):
         if lvl == 1:
@@ -410,9 +416,8 @@ class Sonja(CO):
     luck_levels = ((9, 9), (9, 9), (9, 9))
 
     def counter_boost(self, lvl):
-        # 1.5x counters, except during Counter Break, when they strike first at normal strength
-        # (fits 359/362 fights in Sonja replays; 1.5x there leaves 19 impossible)
-        return lvl < 2
+        # x1.5 on her counters at every level; under Counter Break her first strike is not a counter (game.do_attack)
+        return True
 
     def sees_hidden(self, lvl):
         return lvl >= 1

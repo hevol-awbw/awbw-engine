@@ -192,6 +192,8 @@ def weapon(att: UT, dfn: UT, ammo: int) -> tuple[int, bool]:
     """(base damage, uses ammo) of the weapon `att` fights `dfn` with: the main chart's weapon while it has ammo for
     it (or it needs none), else the machine gun if it has one (0 = cannot attack)."""
     b = DMG[att][dfn]
+    if att == UT.CRUISER and ammo <= 0:          # libaw B23: out of ammo a Cruiser cannot fire at all
+        return 0, False
     if b and (ammo > 0 or not uses_ammo(att, dfn)):
         return b, uses_ammo(att, dfn)
     return MG_DMG[att][dfn], False

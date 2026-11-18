@@ -7,6 +7,7 @@ Randomness (luck) comes from `Game.rng`; pass `luck_fn` to override for tests.
 from __future__ import annotations
 
 import heapq
+import math
 import random
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -93,6 +94,15 @@ class Player:
 
     def clone(self) -> "Player":
         return Player(self.co, self.country, self.funds, self.charge, self.power, self.uses, self.had_units)
+
+
+def _hits_hidden(att, target) -> bool:
+    """Who can hit a dived Sub (Cruiser, Sub) or a hidden Stealth (Fighter, Stealth)."""
+    if target == UT.SUB:
+        return att in (UT.CRUISER, UT.SUB)
+    if target == UT.STEALTH:
+        return att in (UT.FIGHTER, UT.STEALTH)
+    return True
 
 
 def disp(hp: int) -> int:
@@ -293,21 +303,38 @@ class Game:
         return r
 
     def damage_calc(self, a, d, luck, counter=False) -> int:
-        """AWBW damage in internal HP percent: rounded UP to the next 0.05, then down to an integer
-        (fits 646/661 exact counter-damage observations from real replays; plain floor fits 644 and never one more)."""
+        """AWBW damage in internal HP percent (libaw rule findings #1, #2, #3, #6; AWBW's own order of operations):
+        raw = hp/10 * (base * attack/100 + luck) * (200 - (defence + stars * def hp)) / 100, rounded to one decimal, then
+        cut to a whole point. Exactly k - 0.05 goes the way AWBW's doubles go (79.95 on paper dealt 79).
+        attack = CO value + power +10 + com towers (+ Colin's unrounded funds bonus); a boosted counterattack (Sonja,
+        Kanbei under Samurai Spirit) adds half of the CO's own day-to-day attack value only - not towers, power or luck."""
         b = weapon(a.type, d.type, a.ammo)[0]
         if b == 0:
             return 0
+        p = a.owner
+        co = self.co(p)
         aco = self.atk_pct(a, d)
+        if counter and co.counter_boost(self.lvl(p)):
+            aco += co.atk(self, p, a, d, 0) * 50 // 100
+        milli = co.atk_milli(self, p, self.lvl(p))
         dco = self.def_pct(d, a)
         dtr = self.stars_of(d) * self.co(d.owner).star_mult(self.lvl(d.owner))
-        num = (b * aco + 100 * luck) * disp(a.hp) * (200 - (dco + dtr * disp(d.hp)))
-        den = 100 * 10 * 100
-        if counter and self.co(a.owner).counter_boost(self.lvl(a.owner)):
-            num, den = num * 3, den * 2
-        if num <= 0:
+        defence = 200 - (dco + dtr * disp(d.hp))
+        n = disp(a.hp) * (b * (1000 * aco + milli) + 100000 * luck) * defence      # raw = n / 1e8
+        if n <= 0:
             return 0
-        return -(-20 * num // den) // 20      # ceil to 0.05, then floor
+        q = n + 5000000
+        if q % 100000000:
+            return q // 100000000
+        # exactly k - 0.05: AWBW's doubles decide
+        raw = (disp(a.hp) / 10.0) * (b * ((aco + milli / 1000.0) / 100.0) + luck)
+        raw = raw * (defence / 100.0)
+        tenths = math.floor(raw * 10.0)
+        if (tenths + 1.0) / 10.0 == raw:
+            tenths += 1.0
+        if raw >= (tenths + 0.5) / 10.0:
+            tenths += 1.0
+        return int(tenths) // 10
 
     def attack_range(self, u):
         info = UNITS[u.type]
@@ -323,6 +350,8 @@ class Game:
         if not t.hidden:
             return True
         if self.co(p).sees_hidden(self.lvl(p)):
+            return True
+        if self.owners[t.y][t.x] == p:          # libaw A3: on the viewer's own property it is revealed
             return True
         for dx, dy in NEIGH:
             o = self.unit_at(t.x + dx, t.y + dy)
@@ -402,16 +431,23 @@ class Game:
     def do_attack(self, a, d):
         direct = UNITS[a.type].rmax == 1
         co_d = self.co(d.owner)
-        counter_first = (co_d.name == "Sonja" and self.lvl(d.owner) == 2 and direct and self.can_counter(d, a))
+        counter_break = (co_d.name == "Sonja" and self.lvl(d.owner) == 2 and direct
+                         and UNITS[d.type].rmin == 1 and UNITS[d.type].rmax == 1)
+        # libaw B20: a defender that could hit the attacker by the chart but cannot fire now (no ammo, no second
+        # weapon) never strikes, and AWBW then drops the attack altogether
+        if counter_break and DMG[d.type][a.type] > 0 and not self.can_hit(d, a):
+            return
+        counter_first = counter_break and self.can_counter(d, a)
         if counter_first:
             uses = weapon(d.type, a.type, d.ammo)[1]
-            cd = self.damage_calc(d, a, self.roll_luck(d.owner), counter=True)
+            cd = self.damage_calc(d, a, self.roll_luck(d.owner))          # first strike: no x1.5
             if uses:
                 d.ammo -= 1
             if self._hit(d.owner, a, cd):
                 return
             uses = weapon(a.type, d.type, a.ammo)[1]
-            dmg = self.damage_calc(a, d, self.roll_luck(a.owner))
+            # libaw B24: AWBW resolves the attacker's strike as a counterattack (an attacking Sonja / Kanbei SCOP: x1.5)
+            dmg = self.damage_calc(a, d, self.roll_luck(a.owner), counter=True)
             if uses:
                 a.ammo -= 1
             self._hit(a.owner, d, dmg)
@@ -424,7 +460,12 @@ class Game:
             return
         if direct and self.can_counter(d, a):
             uses = weapon(d.type, a.type, d.ammo)[1]
-            cd = self.damage_calc(d, a, self.roll_luck(d.owner), counter=True)
+            # libaw B12: a dived Sub / hidden Stealth takes nothing from a counter by a unit that cannot hit it hidden
+            # (the defender still fires and spends its ammo)
+            if a.hidden and not _hits_hidden(d.type, a.type):
+                cd = 0
+            else:
+                cd = self.damage_calc(d, a, self.roll_luck(d.owner), counter=True)
             if uses:
                 d.ammo -= 1
             self._hit(d.owner, a, cd)
@@ -439,7 +480,7 @@ class Game:
         lowest = -self.co(a.owner).luck(self.lvl(a.owner))[1]      # no luck roll: always the lowest possible roll
         num = (b * aco + 100 * lowest) * disp(a.hp) * 100
         dmg = -(-20 * num // 100000) // 20 if num > 0 else 0     # same scale as damage_calc
-        if uses:
+        if uses or (UNITS[a.type].ammo > 0 and a.ammo <= 0):     # libaw A8: even at 0 (ammo goes to -1)
             a.ammo -= 1
         self.cp[y][x] -= dmg
         if self.cp[y][x] <= 0:
@@ -471,7 +512,9 @@ class Game:
             if occ is not None and occ.id != u.id:
                 if self.can_carry(occ, u):
                     acts.append(Action(AT.LOAD, u.id, dest))
-                elif (occ.type == u.type and occ.hp < 100 and not occ.cargo and not u.cargo):
+                elif (occ.type == u.type and occ.hp < 100
+                      and len(occ.cargo) + len(u.cargo) <= (CARRY[u.type][0] if u.type in CARRY else 0)):
+                    # libaw B16: two transports of one kind join when the combined cargo fits
                     acts.append(Action(AT.JOIN, u.id, dest))
                 continue
             moved = dest != (u.x, u.y) or u.moved
@@ -508,9 +551,9 @@ class Game:
         if u.type in TRANSPORTS and self.kinds[dest[1]][dest[0]] in (TK.SEA, TK.REEF):
             return acts
         for cid in u.cargo:
+            # cargo that boarded this turn CAN be dropped (replay 1735206 d6: infantry boards an APC, is dropped the same
+            # turn). The refusal in live game 1764106 (2026-11-15) was the Black Boat standing on sea (rule above).
             c = self.units[cid]
-            if c.acted:   # AWBW refuses to drop cargo that boarded this turn (live game 1764106, 2026-11-15)
-                continue
             for dx, dy in NEIGH:
                 q = (dest[0] + dx, dest[1] + dy)
                 if (self.in_bounds(*q) and (self.unit_at(*q) is None or q == (u.x, u.y) and dest != q)
@@ -720,6 +763,10 @@ class Game:
         other.fuel = min(info.fuel, other.fuel + u.fuel)
         other.ammo = min(info.ammo, other.ammo + u.ammo)
         self.players[u.owner].funds += self.unit_cost(u.owner, u.type) * excess // 10
+        for cid in u.cargo:                      # cargo passes to the survivor (libaw B16)
+            other.cargo.append(cid)
+            self.units[cid].loaded_in = other.id
+        u.cargo = []
         self.units.pop(u.id, None)       # u already left self.pos when it moved onto `other`
         other.acted = True               # AWBW: joining ends the merged unit's turn, even if it had not acted yet
 
@@ -775,6 +822,8 @@ class Game:
         for y in range(self.h):
             for x in range(self.w):
                 if self.kinds[y][x] == TK.CITY and self.owners[y][x] == p and (x, y) not in self.pos:
+                    if self.unit_limit is not None and len(self.my_units(p)) >= self.unit_limit:
+                        return                   # libaw B11: spawns stop at the unit limit
                     self._spawn(p, ut, x, y, hp=90)
 
     def market_crash(self, p):
@@ -786,30 +835,52 @@ class Game:
                 pl = self.players[q]
                 pl.charge = max(0, pl.charge - self.max_charge(q) * funds // 50000)
 
-    # Missiles (checked against AWBW replays: 7/7 Von Bolt centres, 5/6 Rachel missiles): the centre can be any tile;
-    # it is the one where the enemy loses the most, counting only damage the missile can really do (at most `hp`
-    # displayed HP, never below 1); among tied tiles AWBW's pick looks random, the engine takes the first. The blast (radius 2) then hits
-    # EVERY unit in range, the caster's own included, leaving at least 0.1 HP.
-    def _missile_score(self, enemy, cx, cy, score, hp):
-        total = 0
+    # Missiles (libaw rule findings A6; reproduces all 33 recorded Rachel missiles and 16 Von Bolt ones there): every tile
+    # is scored, rows top to bottom then left to right, by what the 2-tile blast would do - enemy units count for, the
+    # caster's own against. A unit showing h HP loses L = 3, or h - 1 at h <= 3, or 0.1 at h <= 1 (in tenths here: 30 /
+    # 10(h-1) / 1); price = the owner's CO price. The strictly highest score wins (value and HP aims: ties go to more unit
+    # value in the blast); nothing fires unless a tile scores above 0. Rachel: foot (L x 4 for infantry / mech, x2 more for
+    # an enemy on a property it is capturing, 1 at h <= 1), then value (price x L), then HP (L); Von Bolt: value; Sturm:
+    # price x h, centred on a tile holding an enemy unit, first tile wins ties.
+    def _aim(self, p, aim):
+        tiles = {}
         for v in self.units.values():
-            if v.owner == enemy and v.loaded_in is None and abs(v.x - cx) + abs(v.y - cy) <= 2:
-                total += score(v, min(hp, disp(v.hp) - 1))
-        return total
-
-    def _best_center(self, p, score, hp=3):
-        enemy = 1 - p
-        best, bc = 0, None
-        tied = []
+            if v.loaded_in is not None:
+                continue
+            enemy = v.owner != p
+            sign = 1 if enemy else -1
+            h = disp(v.hp)
+            loss = 1 if h <= 1 else (h - 1) * 10 if h <= 3 else 30
+            price = self.unit_cost(v.owner, v.type)
+            if aim == "value":
+                score, value = price * loss, price * h
+            elif aim == "sturm":
+                score, value = price * h, price * h
+            elif aim == "hp":
+                score, value = loss, h
+            else:
+                capturing = enemy and self.cp[v.y][v.x] < CP_MAX
+                weight = 1 if h <= 1 else (4 if v.type in FOOT else 1) * (2 if capturing else 1)
+                score, value = weight * loss, h
+            tiles[(v.x, v.y)] = (sign * score, sign * value, enemy)
+        best, top, top_value = None, 0, 0
         for y in range(self.h):
             for x in range(self.w):
-                s = self._missile_score(enemy, x, y, score, hp)
-                if s > best:
-                    best, bc, tied = s, (x, y), [(x, y)]
-                elif s == best and s > 0:
-                    tied.append((x, y))
-        self.last_missile_options.append(tied)     # AWBW seems to pick randomly among tied tiles
-        return bc
+                if aim == "sturm" and not (tiles.get((x, y)) or (0, 0, False))[2]:
+                    continue
+                score = value = 0
+                for dy in range(-2, 3):
+                    r = 2 - abs(dy)
+                    for dx in range(-r, r + 1):
+                        t = tiles.get((x + dx, y + dy))
+                        if t:
+                            score += t[0]
+                            value += t[1]
+                tie = score == top and aim in ("value", "hp") and value > top_value
+                if score > 0 and (score > top or tie):
+                    best, top, top_value = (x, y), score, value
+        self.last_missile_options.append([best] if best else [])
+        return best
 
     def _blast(self, p, center, dmg, stun=False):
         self.last_missiles.append(center)
@@ -824,23 +895,19 @@ class Game:
                     # caster's next turn (enemy units hit: 0.9% on their next turn)
                     v.acted = True
 
-    @staticmethod
-    def _value(v, lost):
-        return UNITS[v.type].cost * lost // 10
-
     def sturm_missile(self, p, dmg):
-        c = self._best_center(p, self._value, dmg // 10)
+        c = self._aim(p, "sturm")
         if c:
             self._blast(p, c, dmg)
 
     def von_bolt_missile(self, p):
-        c = self._best_center(p, self._value)
+        c = self._aim(p, "value")
         if c:
             self._blast(p, c, 30, stun=True)
 
     def rachel_missiles(self, p):
-        for score in (lambda v, lost: lost if v.type in FOOT else 0, self._value, lambda v, lost: lost):
-            c = self._best_center(p, score)
+        targets = [self._aim(p, a) for a in ("foot", "value", "hp")]      # all aimed before any lands
+        for c in targets:
             if c:
                 self._blast(p, c, 30)
 

@@ -72,6 +72,15 @@ fn is_direct(t: u8) -> bool {
     UNIT_RMAX[t as usize] == 1
 }
 
+/// Who can hit a dived Sub (Cruiser, Sub) or a hidden Stealth (Fighter, Stealth). Mirrors game.py _hits_hidden.
+fn hits_hidden(att: u8, target: u8) -> bool {
+    match target {
+        UT_SUB => att == UT_CRUISER || att == UT_SUB,
+        UT_STEALTH => att == UT_FIGHTER || att == UT_STEALTH,
+        _ => true,
+    }
+}
+
 fn is_indirect(t: u8) -> bool {
     UNIT_RMAX[t as usize] > 1
 }
@@ -340,7 +349,7 @@ impl Game {
                 if IS_FOOT[tu] { 100 } else if is_direct(t) { pick(lvl, (120, 130, 150)) } else if is_indirect(t) { 90 } else { 100 }
             }
             CO_SAMI => if IS_FOOT[tu] { pick(lvl, (130, 150, 170)) } else if is_direct(t) { 90 } else { 100 },
-            CO_COLIN => 90 + if lvl == 2 { fdiv(3 * self.players[p].funds, 1000) } else { 0 },
+            CO_COLIN => 90, // Power of Money: co_atk_milli (libaw #6, unrounded)
             CO_GRIT => {
                 if is_indirect(t) { pick(lvl, (120, 140, 140)) } else if IS_FOOT[tu] { 100 } else if is_direct(t) { 80 } else { 100 }
             }
@@ -395,9 +404,14 @@ impl Game {
     fn co_counter_boost(&self, p: usize, lvl: u8) -> bool {
         match self.co(p) {
             CO_KANBEI => lvl == 2,
-            CO_SONJA => lvl < 2,
+            CO_SONJA => true, // at every level; under Counter Break her first strike is not a counter (do_attack)
             _ => false,
         }
+    }
+
+    /// Extra attack in thousandths of a percent point, unrounded (Colin's Power of Money, libaw #6).
+    fn co_atk_milli(&self, p: usize, lvl: u8) -> i64 {
+        if self.co(p) == CO_COLIN && lvl == 2 { 3 * self.players[p].funds.max(0) } else { 0 }
     }
 
     fn co_star_mult(&self, p: usize, lvl: u8) -> i64 {
@@ -410,7 +424,7 @@ impl Game {
         match self.co(p) {
             CO_ANDY => if lvl == 2 { 1 } else { 0 },
             CO_JAKE => if lvl == 2 && IS_VEHICLE[tu] { 2 } else { 0 },
-            CO_MAX => if is_direct(t) && !IS_FOOT[tu] { l } else { 0 },
+            CO_MAX => if !(is_indirect(t) || IS_FOOT[tu] || IS_TRANSPORT[tu]) { l } else { 0 }, // libaw B21
             CO_SAMI => (if IS_FOOT[tu] { l } else { 0 }) + if IS_TRANSPORT[tu] { 1 } else { 0 },
             CO_DRAKE => if IS_NAVAL[tu] { 1 } else { 0 },
             CO_JESS => if IS_VEHICLE[tu] { l } else { 0 },
@@ -635,6 +649,9 @@ impl Game {
     /// (or needs none), else the machine gun (MG_DMG) if it has one. Mirrors data.weapon.
     fn weapon(at: u8, dt: u8, ammo: i64) -> (i64, bool) {
         let (a, d) = (at as usize, dt as usize);
+        if at == UT_CRUISER && ammo <= 0 {
+            return (0, false); // libaw B23: out of ammo a Cruiser cannot fire at all
+        }
         if DMG[a][d] > 0 && (ammo > 0 || !USES_AMMO[a][d]) {
             (DMG[a][d], USES_AMMO[a][d])
         } else {
@@ -646,19 +663,34 @@ impl Game {
         if b == 0 {
             return 0;
         }
-        let aco = self.atk_pct(a);
+        let p = a.owner;
+        let mut aco = self.atk_pct(a);
+        if counter && self.co_counter_boost(p, self.lvl(p)) {
+            aco += fdiv(self.co_atk(p, a, 0) * 50, 100); // x1.5 on the CO's own day-to-day attack value only
+        }
+        let milli = self.co_atk_milli(p, self.lvl(p));
         let dco = self.def_pct(d, a);
         let dtr = self.stars_of(d) * self.co_star_mult(d.owner, self.lvl(d.owner));
-        let mut num = (b * aco + 100 * luck) * disp(a.hp) * (200 - (dco + dtr * disp(d.hp)));
-        let mut den = 100 * 10 * 100;
-        if counter && self.co_counter_boost(a.owner, self.lvl(a.owner)) {
-            num *= 3;
-            den *= 2;
-        }
-        if num <= 0 {
+        let defence = 200 - (dco + dtr * disp(d.hp));
+        let n = disp(a.hp) as i128 * (b as i128 * (1000 * aco as i128 + milli as i128) + 100_000 * luck as i128) * defence as i128;
+        if n <= 0 {
             return 0;
         }
-        fdiv(-fdiv(-20 * num, den), 20)
+        let q = n + 5_000_000;
+        if q % 100_000_000 != 0 {
+            return (q / 100_000_000) as i64;
+        }
+        // exactly k - 0.05: AWBW's doubles decide (79.95 on paper dealt 79)
+        let raw = (disp(a.hp) as f64 / 10.0) * (b as f64 * ((aco as f64 + milli as f64 / 1000.0) / 100.0) + luck as f64);
+        let raw = raw * (defence as f64 / 100.0);
+        let mut tenths = (raw * 10.0).floor();
+        if (tenths + 1.0) / 10.0 == raw {
+            tenths += 1.0;
+        }
+        if raw >= (tenths + 0.5) / 10.0 {
+            tenths += 1.0;
+        }
+        (tenths as i64) / 10
     }
 
     fn attack_range(&self, owner: usize, t: u8) -> (i64, i64) {
@@ -682,6 +714,9 @@ impl Game {
         }
         if self.co_sees_hidden(p, self.lvl(p)) {
             return true;
+        }
+        if self.owners[self.idx(t.x, t.y)] == p as i8 {
+            return true; // libaw A3: on the viewer's own property it is revealed
         }
         for (dx, dy) in NEIGH {
             let (x, y) = (t.x + dx, t.y + dy);
@@ -1001,11 +1036,17 @@ impl Game {
         let d_owner = self.u(did).owner;
         let a_owner = self.u(aid).owner;
         let direct = UNIT_RMAX[at as usize] == 1;
-        let counter_first = self.co(d_owner) == CO_SONJA && self.lvl(d_owner) == 2 && direct && self.can_counter(did, aid);
+        let counter_break = self.co(d_owner) == CO_SONJA && self.lvl(d_owner) == 2 && direct
+            && UNIT_RMIN[dt as usize] == 1 && UNIT_RMAX[dt as usize] == 1;
+        // libaw B20: a defender that could hit by the chart but cannot fire now never strikes; the attack is dropped
+        if counter_break && DMG[dt as usize][at as usize] > 0 && !self.can_hit(dt, self.u(did).ammo, at) {
+            return;
+        }
+        let counter_first = counter_break && self.can_counter(did, aid);
         if counter_first {
             let luck = self.roll_luck(d_owner);
             let (b, uses) = Self::weapon(dt, at, self.u(did).ammo);
-            let cd = self.damage_calc(&self.uv(did), &self.uv(aid), b, luck, true);
+            let cd = self.damage_calc(&self.uv(did), &self.uv(aid), b, luck, false); // first strike: no x1.5
             if uses {
                 self.um(did).ammo -= 1;
             }
@@ -1014,7 +1055,8 @@ impl Game {
             }
             let luck = self.roll_luck(a_owner);
             let (b, uses) = Self::weapon(at, dt, self.u(aid).ammo);
-            let dmg = self.damage_calc(&self.uv(aid), &self.uv(did), b, luck, false);
+            // libaw B24: the attacker's strike is resolved as a counterattack (an attacking Sonja / Kanbei SCOP: x1.5)
+            let dmg = self.damage_calc(&self.uv(aid), &self.uv(did), b, luck, true);
             if uses {
                 self.um(aid).ammo -= 1;
             }
@@ -1033,7 +1075,8 @@ impl Game {
         if direct && self.can_counter(did, aid) {
             let luck = self.roll_luck(d_owner);
             let (b, uses) = Self::weapon(dt, at, self.u(did).ammo);
-            let cd = self.damage_calc(&self.uv(did), &self.uv(aid), b, luck, true);
+            // libaw B12: a dived Sub / hidden Stealth takes nothing from a counter by a unit that cannot hit it hidden
+            let cd = if self.u(aid).hidden && !hits_hidden(dt, at) { 0 } else { self.damage_calc(&self.uv(did), &self.uv(aid), b, luck, true) };
             if uses {
                 self.um(did).ammo -= 1;
             }
@@ -1082,8 +1125,8 @@ impl Game {
         let lowest = -self.co_luck(a.owner).1;
         let num = (b * aco + 100 * lowest) * disp(a.hp) * 100;
         let dmg = if num > 0 { fdiv(-fdiv(-20 * num, 100000), 20) } else { 0 };
-        if uses {
-            self.um(aid).ammo -= 1;
+        if uses || (UNIT_AMMO[a.t as usize] > 0 && self.u(aid).ammo <= 0) {
+            self.um(aid).ammo -= 1; // libaw A8: even at 0 (ammo goes to -1)
         }
         let i = self.idx(x, y);
         self.cp[i] -= dmg;
@@ -1119,10 +1162,8 @@ impl Game {
             return;
         }
         for &cid in &u.cargo {
+            // cargo that boarded this turn CAN be dropped (replay 1735206); 1764106's refusal was the boat on sea (above)
             let c = self.u(cid);
-            if c.acted {
-                continue; // AWBW refuses to drop cargo that boarded this turn (live game 1764106, 2026-11-15)
-            }
             for (dx, dy) in NEIGH {
                 let q = (dest.0 + dx, dest.1 + dy);
                 if !self.in_bounds(q.0, q.1) {
@@ -1153,7 +1194,8 @@ impl Game {
                     let o = self.u(occ);
                     if self.can_carry(occ, id) {
                         acts.push(Action::unit(AT_LOAD, id, dest));
-                    } else if o.t == u.t && o.hp < 100 && o.cargo.is_empty() && u.cargo.is_empty() {
+                    } else if o.t == u.t && o.hp < 100 && o.cargo.len() + u.cargo.len() <= CARRY_CAP[u.t as usize] {
+                        // libaw B16: two transports of one kind join when the combined cargo fits
                         acts.push(Action::unit(AT_JOIN, id, dest));
                     }
                     continue;
@@ -1558,6 +1600,11 @@ impl Game {
         }
         let refund = fdiv(self.unit_cost(uowner, ut) * excess, 10);
         self.players[uowner].funds += refund;
+        let cargo = std::mem::take(&mut self.um(id).cargo); // cargo passes to the survivor (libaw B16)
+        for cid in cargo {
+            self.um(other).cargo.push(cid);
+            self.um(cid).loaded_in = other;
+        }
         let ui = self.uidx(id).unwrap();
         self.units.remove(ui);
         self.reindex();
@@ -1644,6 +1691,9 @@ impl Game {
             for x in 0..self.w {
                 let i = self.idx(x, y);
                 if self.kinds[i] == TK_CITY && self.owners[i] == p as i8 && self.pos[i] == NONE {
+                    if self.unit_limit >= 0 && self.my_count(p) as i64 >= self.unit_limit {
+                        return; // libaw B11: spawns stop at the unit limit
+                    }
                     self.spawn(p, ut, x, y, 90, false);
                 }
             }
@@ -1657,41 +1707,60 @@ impl Game {
         self.players[q].charge = (self.players[q].charge - drop).max(0);
     }
 
-    /// score kinds: 0 = value of HP lost, 1 = foot soldiers' HP lost, 2 = HP lost
-    fn missile_score(&self, enemy: usize, cx: i32, cy: i32, kind: u8, hp: i64) -> i64 {
-        let mut total = 0;
+    /// Missile aim (libaw rule findings A6), mirrors game.py _aim. aim: 0 value, 1 foot (Rachel's first), 2 HP, 3 Sturm.
+    fn aim(&mut self, p: usize, aim: u8) -> Option<(i32, i32)> {
+        let n = (self.w * self.h) as usize;
+        let mut tiles: Vec<Option<(i64, i64, bool)>> = vec![None; n];
         for v in &self.units {
-            if v.owner == enemy && v.loaded_in == NONE && (v.x - cx).abs() + (v.y - cy).abs() <= 2 {
-                let lost = hp.min(disp(v.hp) - 1);
-                total += match kind {
-                    0 => fdiv(UNIT_COST[v.t as usize] * lost, 10),
-                    1 => if IS_FOOT[v.t as usize] { lost } else { 0 },
-                    _ => lost,
-                };
+            if v.loaded_in != NONE {
+                continue;
             }
+            let enemy = v.owner != p;
+            let sign = if enemy { 1 } else { -1 };
+            let h = disp(v.hp);
+            let loss = if h <= 1 { 1 } else if h <= 3 { (h - 1) * 10 } else { 30 };
+            let price = self.unit_cost(v.owner, v.t);
+            let i = self.idx(v.x, v.y);
+            let (score, value) = match aim {
+                0 => (price * loss, price * h),
+                3 => (price * h, price * h),
+                2 => (loss, h),
+                _ => {
+                    let capturing = enemy && self.cp[i] < CP_MAX;
+                    let weight = if h <= 1 { 1 } else { (if IS_FOOT[v.t as usize] { 4 } else { 1 }) * (if capturing { 2 } else { 1 }) };
+                    (weight * loss, h)
+                }
+            };
+            tiles[i] = Some((sign * score, sign * value, enemy));
         }
-        total
-    }
-
-    fn best_center(&mut self, p: usize, kind: u8, hp: i64) -> Option<(i32, i32)> {
-        let enemy = 1 - p;
-        let mut best = 0;
-        let mut bc = None;
-        let mut tied = Vec::new();
+        let (mut best, mut top, mut top_value) = (None, 0i64, 0i64);
         for y in 0..self.h {
             for x in 0..self.w {
-                let s = self.missile_score(enemy, x, y, kind, hp);
-                if s > best {
-                    best = s;
-                    bc = Some((x, y));
-                    tied = vec![(x, y)];
-                } else if s == best && s > 0 {
-                    tied.push((x, y));
+                if aim == 3 && !tiles[self.idx(x, y)].map_or(false, |t| t.2) {
+                    continue;
+                }
+                let (mut score, mut value) = (0i64, 0i64);
+                for dy in -2i32..=2 {
+                    let r = 2 - dy.abs();
+                    for dx in -r..=r {
+                        if self.in_bounds(x + dx, y + dy) {
+                            if let Some(t) = tiles[self.idx(x + dx, y + dy)] {
+                                score += t.0;
+                                value += t.1;
+                            }
+                        }
+                    }
+                }
+                let tie = score == top && (aim == 0 || aim == 2) && value > top_value;
+                if score > 0 && (score > top || tie) {
+                    best = Some((x, y));
+                    top = score;
+                    top_value = value;
                 }
             }
         }
-        self.last_missile_options.push(tied);
-        bc
+        self.last_missile_options.push(best.into_iter().collect());
+        best
     }
 
     fn blast(&mut self, p: usize, c: (i32, i32), dmg: i64, stun: bool) {
@@ -1709,22 +1778,21 @@ impl Game {
     }
 
     fn sturm_missile(&mut self, p: usize, dmg: i64) {
-        if let Some(c) = self.best_center(p, 0, fdiv(dmg, 10)) {
+        if let Some(c) = self.aim(p, 3) {
             self.blast(p, c, dmg, false);
         }
     }
 
     fn von_bolt_missile(&mut self, p: usize) {
-        if let Some(c) = self.best_center(p, 0, 3) {
+        if let Some(c) = self.aim(p, 0) {
             self.blast(p, c, 30, true);
         }
     }
 
     fn rachel_missiles(&mut self, p: usize) {
-        for kind in [1u8, 0, 2] {
-            if let Some(c) = self.best_center(p, kind, 3) {
-                self.blast(p, c, 30, false);
-            }
+        let targets: Vec<Option<(i32, i32)>> = [1u8, 0, 2].iter().map(|&k| self.aim(p, k)).collect(); // aimed before any lands
+        for c in targets.into_iter().flatten() {
+            self.blast(p, c, 30, false);
         }
     }
 

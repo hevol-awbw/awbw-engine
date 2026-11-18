@@ -112,7 +112,8 @@ def test_kanbei_scop_counter_boost():
     g.players[1].power = 2
     base = g.damage_calc(g.units[2], g.units[1], 0, counter=False)
     boosted = g.damage_calc(g.units[2], g.units[1], 0, counter=True)
-    assert boosted > base and abs(boosted - base * 1.5) <= 1.5
+    # libaw #3: x1.5 on Kanbei's own day-to-day attack value only (130 -> +65), not the power bonus: 140+10 -> 215
+    assert boosted > base and abs(boosted - base * 215 / 150) <= 1.5
 
 
 def test_sonja_counter_break_strikes_first():
@@ -340,7 +341,7 @@ def test_cargo_dies_with_transport():
 
 
 def test_no_boarding_a_lander_over_sea():
-    # AWBW: cargo boards only where it could stand itself (shoal / port / beach), never onto a transport at sea
+    # 2026-10-29 fix: cargo boards only where it could stand itself (a tank cannot enter sea)
     g = new(["..~~.", "..~~.", ".....", ".....", "....."], [(0, UT.LANDER, 2, 0), (0, UT.TANK, 1, 0), (1, UT.INF, 4, 4)])
     tank = g.units[2]
     assert not any(a.type == AT.LOAD and a.dest == (2, 0) for a in g.unit_actions(tank))
@@ -406,14 +407,12 @@ def test_join_ends_the_merged_units_turn():
 
 
 
-def test_cargo_that_boarded_this_turn_cannot_be_dropped():
-    # live game 1764106 (2026-11-15): AWBW refused an unload of infantry that had boarded the Black Boat the same turn
+def test_cargo_that_boarded_this_turn_can_be_dropped():
+    # replay 1735206 day 6: infantry boards an APC and is dropped the same turn. (Live game 1764106's refused drop,
+    # 2026-11-15, was a Black Boat standing on sea: test_no_unload_from_a_transport_on_sea.)
     g = new(PLAIN5, [(0, UT.INF, 1, 1), (0, UT.APC, 2, 1), (1, UT.INF, 4, 4)])
     g.step(A(AT.LOAD, 1, (2, 1)))
-    assert not [a for a in g.legal_actions() if a.type == AT.UNLOAD]
-    g.step(A(AT.END_TURN))
-    g.step(A(AT.END_TURN))
-    assert [a for a in g.legal_actions() if a.type == AT.UNLOAD]        # next turn it can be dropped again
+    assert [a for a in g.legal_actions() if a.type == AT.UNLOAD]
 
 
 def test_out_of_ammo_units_fire_their_machine_gun():
@@ -542,8 +541,9 @@ def test_colin_gold_rush_and_power_of_money():
     charge_to(g, 0, 1); g.step(A(AT.POWER, arg=1))
     assert g.players[0].funds == f * 3 // 2
     g.players[0].power = 2
-    # 90% + 10% power + 3*funds/1000 %
-    assert g.atk_pct(g.units[1], g.units[2]) == 90 + 10 + 3 * g.players[0].funds // 1000
+    # 90% + 10% power, plus 3% per 1000 funds unrounded (libaw #6), kept in thousandths of a point
+    assert g.atk_pct(g.units[1], g.units[2]) == 90 + 10
+    assert g.co(0).atk_milli(g, 0, 2) == 3 * g.players[0].funds
 
 
 def test_sensei_spawns_units_on_empty_owned_cities():
@@ -567,7 +567,9 @@ def test_von_bolt_stun_blocks_next_turn():
 def test_von_bolt_stuns_own_units_for_the_rest_of_the_turn():
     # AWBW (user, live game 1765038; 470 expert Von Bolt games, tools/vb_stun*.py): Ex Machina also stuns the caster's own
     # units in the blast (units_moved -1) - they cannot act this turn but are free again on the caster's next turn
-    g = new(PLAIN5, [(0, UT.TANK, 2, 3), (1, UT.TANK, 3, 3), (1, UT.TANK, 4, 3), (0, UT.INF, 0, 0)], cos=("Von Bolt", "Andy"))
+    # own infantry where every blast that catches all three enemy tanks also catches it (libaw A6: own units count against)
+    g = new(PLAIN5, [(0, UT.INF, 2, 3), (1, UT.TANK, 1, 3), (1, UT.TANK, 3, 3), (1, UT.TANK, 2, 2), (0, UT.INF, 0, 0)],
+            cos=("Von Bolt", "Andy"))
     charge_to(g, 0, 2); g.step(A(AT.POWER, arg=2))
     own = g.units[1]
     assert own.hp < 100 and own.acted and not own.stunned and not g.unit_actions(own)
