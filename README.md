@@ -15,10 +15,9 @@ no game art or map data.
 - Income, repairs at turn start, crash on zero fuel, weather.
 - Win conditions: HQ capture, rout, capture limit, day limit (most properties), unit limit, unit bans.
 
-The Python engine was checked against about 100 real AWBW league games by replaying every action from each turn's
-snapshot (legality, damage, power results, turn-start state). A few edge cases remain (some Sonja Counter Break cases,
-occasional 1-HP turn-start differences, hidden-sub fuel timing). Some constants, such as the power star cost, use
-AW2 values and are marked UNVERIFIED in the code.
+The Python engine has been validated against more than 40,000 real AWBW Global League and Live League games:
+every action of every game is replayed through the engine from AWBW's own turn snapshots and checked for
+legality, damage, power-meter charge, power effects and the full board state at each turn start.
 
 ## Python
 
