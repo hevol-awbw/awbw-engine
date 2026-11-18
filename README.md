@@ -3,8 +3,13 @@
 A rules engine for **Advance Wars By Web** (AWBW) style games: standard, no fog, 1v1. Written in Python as the
 reference implementation, with a fast Rust port (`awbw_rs`) that is tested to match it exactly.
 
-This is an unofficial fan project. It is not affiliated with AWBW or Nintendo / Intelligent Systems and contains
-no game art or map data.
+![Two bots playing a 20-day game on this engine](docs/demo.gif)
+
+*Two simple bots playing a full 20-day game on this engine (random map, Grit vs Javier), shown in a separate replay
+viewer.*
+
+This is an unofficial fan project. It is not affiliated with AWBW or Nintendo / Intelligent Systems. The code contains
+no game art or map data; the recording above uses AWBW's sprites for display only.
 
 ## What it covers
 
